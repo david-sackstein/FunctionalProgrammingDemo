@@ -71,24 +71,12 @@ namespace SuperMarket.Service
         {
             try // models an application level try catch to convert unexpected exceptions to 5XX
             {
-                Maybe<Product> maybe = _repository.Find(productId);
-
-                Result<Product> result = maybe
-                    .ToResult($"Product with id {productId} was not found");
-
-                Result<Product> ensure = result
-                    .Ensure(_ => quantity <= (uint)Constants.MaxQuantityInOrder, "The order is too large");
-
-                Result<Product> onSuccess = ensure
-                    .OnSuccess(p => p.Quantity < quantity ? OrderFromSupplier(p, quantity) : Result.Ok(p));
-
-                Result<uint> success = onSuccess
-                    .OnSuccess(p => p.Quantity -= quantity);
-
-                HttpResponse httpResponse = success
+                return _repository.Find(productId)
+                    .ToResult($"Product with id {productId} was not found")
+                    .Ensure(_ => quantity <= (uint)Constants.MaxQuantityInOrder, "The order is too large")
+                    .OnSuccess(p => p.Quantity < quantity ? OrderFromSupplier(p, quantity) : Result.Ok(p))
+                    .OnSuccess(p => p.Quantity -= quantity)
                     .OnBoth(t => t.IsSuccess ? Commit() : Response.BadRequest(t.Error));
-
-                return httpResponse;
             }
             catch (Exception e)
             {
@@ -100,16 +88,10 @@ namespace SuperMarket.Service
         {
             uint excess = quantity - product.Quantity;
 
-            Result<uint> ensure = OrderFromSupplierCore(product, excess)
-                .Ensure(orderedQuantity => product.Quantity + orderedQuantity >= quantity, "The product is out of stock");
-
-            Result<uint> onSuccess = ensure
-                .OnSuccess(orderedQuantity => product.Quantity += orderedQuantity);
-
-            Result<Product> orderFromSupplier = onSuccess
+            return OrderFromSupplierCore(product, excess)
+                .Ensure(orderedQuantity => product.Quantity + orderedQuantity >= quantity, "The product is out of stock")
+                .OnSuccess(orderedQuantity => product.Quantity += orderedQuantity)
                 .OnSuccess(_ => product);
-
-            return orderFromSupplier;
         }
 
         private Result<uint> OrderFromSupplierCore(Product product, uint excess)
