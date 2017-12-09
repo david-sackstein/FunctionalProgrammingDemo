@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Linq;
+
 using FunctionalExtensions;
 using SuperMarket.Entities;
 
@@ -67,38 +69,60 @@ namespace SuperMarket.Service
 
         public HttpResponse Order(int productId, uint quantity)
         {
-            var productOrNone = _repository.Find(productId);
-            if (productOrNone.HasNoValue)
-                return Response.BadRequest($"Product with id {productId} was not found");
-
-            var product = productOrNone.Value;
-
-            if (quantity > (uint)Constants.MaxQuantityInOrder)
-                return Response.BadRequest("The order is too large");
-
-            if (product.Quantity < quantity)
+            try // models an application level try catch to convert unexpected exceptions to 5XX
             {
-                uint excess = quantity - product.Quantity;
-                Result<uint> orderedQuantity = OrderFromSupplier(productId, product, excess);
-                if (orderedQuantity.IsFailure)
-                    return Response.InternalError(orderedQuantity.Error);
+                Maybe<Product> maybe = _repository.Find(productId);
 
-                if (product.Quantity + orderedQuantity.Value < quantity)
-                {
-                    return Response.BadRequest("The product is out of stock");
-                }
+                Result<Product> result = maybe
+                    .ToResult($"Product with id {productId} was not found");
 
-                product.Quantity += orderedQuantity.Value;
+                Result<Product> ensure = result
+                    .Ensure(_ => quantity <= (uint)Constants.MaxQuantityInOrder, "The order is too large");
+
+                Result<Product> onSuccess = ensure
+                    .OnSuccess(p => p.Quantity < quantity ? OrderFromSupplier(p, quantity) : Result.Ok(p));
+
+                Result<uint> success = onSuccess
+                    .OnSuccess(p => p.Quantity -= quantity);
+
+                HttpResponse httpResponse = success
+                    .OnBoth(t => t.IsSuccess ? Commit() : Response.BadRequest(t.Error));
+
+                return httpResponse;
             }
-
-            product.Quantity -= quantity;
-
-            return Commit();
+            catch (Exception e)
+            {
+                return Response.InternalError(e.Message);
+            }
         }
+
+        private Result<Product> OrderFromSupplier(Product product, uint quantity)
+        {
+            uint excess = quantity - product.Quantity;
+
+            Result<uint> ensure = OrderFromSupplierCore(product, excess)
+                .Ensure(orderedQuantity => product.Quantity + orderedQuantity >= quantity, "The product is out of stock");
+
+            Result<uint> onSuccess = ensure
+                .OnSuccess(orderedQuantity => product.Quantity += orderedQuantity);
+
+            Result<Product> orderFromSupplier = onSuccess
+                .OnSuccess(_ => product);
+
+            return orderFromSupplier;
+        }
+
+        private Result<uint> OrderFromSupplierCore(Product product, uint excess)
+        {
+            // Don't catch. Allow to propagate (or catch and rethrow if to want to log or add more information)
+            uint ordered = _supplier.Order(product.ProductId, product.Manufacturer, excess);
+            return Result.Ok(ordered);
+        }
+
 
         private HttpResponse Commit()
         {
-            try
+            try // The try catch needs to be moved down to _repository.Commit(), catch exceptions on the lower level possible
             {
                 _repository.Commit();
                 return Response.Ok();
@@ -106,19 +130,6 @@ namespace SuperMarket.Service
             catch (Exception ex)
             {
                 return Response.InternalError(ex.Message);
-            }
-        }
-
-        private Result<uint> OrderFromSupplier(int productId, Product product, uint excess)
-        {
-            try
-            {
-                uint ordered = _supplier.Order(productId, product.Manufacturer, excess);
-                return Result.Ok(ordered);
-            }
-            catch (Exception e)
-            {
-                return Result.Fail<uint>(e.Message);
             }
         }
     }
